@@ -21,6 +21,7 @@ import logging
 import tempfile
 from urllib.parse import urljoin, unquote
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pdfplumber
@@ -38,6 +39,14 @@ from selenium.common.exceptions import (
 )
 
 URL = "https://www.lmempleador.cl/licenses"
+
+ZONA_CHILE = ZoneInfo("America/Santiago")
+
+
+def hoy_chile():
+    """Fecha/hora actual en Chile (no la del servidor, que en Streamlit
+    Cloud corre en UTC y puede estar varias horas adelantada)."""
+    return datetime.now(ZONA_CHILE)
 
 # Rutas típicas donde quedan Chromium y su driver al instalarlos vía
 # packages.txt en Streamlit Cloud (Debian). Si en tu entorno quedan en otra
@@ -304,7 +313,7 @@ def seleccionar_hospital(driver, wait, nombre_hospital):
 def seleccionar_hospital_y_filtrar(driver, nombre_hospital, carpeta_debug, contador_debug, log):
     wait = WebDriverWait(driver, 40)
 
-    hoy = datetime.today()
+    hoy = hoy_chile()
     desde = hoy.strftime("%d/%m/%Y")
     hasta = hoy.strftime("%d/%m/%Y")  # filtro por el día de hoy
 

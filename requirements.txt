@@ -3,3 +3,4 @@ selenium>=4.15
 pandas
 openpyxl
 pdfplumber
+tzdata
