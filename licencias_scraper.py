@@ -22,6 +22,7 @@ import tempfile
 from urllib.parse import urljoin, unquote
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from dateutil.relativedelta import relativedelta
 
 import pandas as pd
 import pdfplumber
@@ -314,8 +315,8 @@ def seleccionar_hospital_y_filtrar(driver, nombre_hospital, carpeta_debug, conta
     wait = WebDriverWait(driver, 40)
 
     hoy = hoy_chile()
-    desde = hoy.strftime("%d/%m/%Y")
-    hasta = hoy.strftime("%d/%m/%Y")  # filtro por el día de hoy
+    desde = (hoy - relativedelta(months=1)).strftime("%d/%m/%Y")
+    hasta = hoy.strftime("%d/%m/%Y")  # rango móvil: un mes hacia atrás desde hoy
 
     time.sleep(5)
     guardar_debug(driver, carpeta_debug, contador_debug, "antes_seleccionar_hospital", log)
@@ -619,66 +620,104 @@ def obtener_folios_actuales(driver):
     return folios
 
 
-def obtener_total_registros_esperado(driver):
+def obtener_total_registros_esperado(driver, intentos=4, espera=1.5):
+    """Lee 'Mostrando registros... de un total de N registros'. Reintenta
+    varias veces y se queda con el valor MÁXIMO visto, porque justo después
+    de aplicar un filtro amplio (ej. 1 mes) la tabla puede mostrar primero un
+    número parcial mientras termina de cargar de forma asíncrona."""
+    mejor = None
+    for _ in range(intentos):
+        try:
+            elementos = driver.find_elements(By.XPATH, "//*[contains(text(),'total de')]")
+            for el in elementos:
+                m = re.search(r"total de\s+(\d+)", el.text)
+                if m:
+                    valor = int(m.group(1))
+                    if mejor is None or valor > mejor:
+                        mejor = valor
+        except Exception:
+            pass
+        time.sleep(espera)
+    return mejor
+
+
+def _intentar_click_pagina_numerada(driver, siguiente_pagina_num, log):
     try:
-        el = driver.find_element(By.XPATH, "//*[contains(text(),'total de')]")
-        m = re.search(r"total de\s+(\d+)", el.text)
-        if m:
-            return int(m.group(1))
-    except Exception:
-        pass
-    return None
-
-
-def ir_siguiente_pagina(driver, pagina_actual, folios_antes, log, timeout_espera=20):
-    siguiente_pagina_num = pagina_actual + 1
-    clicked = False
-
-    try:
-        boton_num = driver.find_element(
+        candidatos = driver.find_elements(
             By.XPATH,
             f"//*[self::button or self::a or self::li or self::span]"
             f"[normalize-space(text())='{siguiente_pagina_num}']"
         )
+        candidatos = [c for c in candidatos if c.is_displayed()]
+        if not candidatos:
+            return False
+        if len(candidatos) > 1:
+            log.info(
+                f"Aviso: se encontraron {len(candidatos)} elementos visibles con el "
+                f"texto '{siguiente_pagina_num}' (posible layout duplicado). Se usa el último."
+            )
+        boton_num = candidatos[-1]
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", boton_num)
         time.sleep(0.5)
         boton_num.click()
-        clicked = True
-    except NoSuchElementException:
-        pass
+        return True
     except Exception:
-        pass
-
-    if not clicked:
-        for texto in ["Siguiente", "Próxima", "Próximo", "Next", ">"]:
-            try:
-                siguiente = driver.find_element(By.XPATH, f"//*[normalize-space(text())='{texto}']")
-                clase = siguiente.get_attribute("class") or ""
-                aria = siguiente.get_attribute("aria-disabled") or ""
-                disabled_attr = siguiente.get_attribute("disabled")
-                if "disabled" in clase.lower() or aria.lower() == "true" or disabled_attr:
-                    return False
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", siguiente)
-                time.sleep(0.5)
-                siguiente.click()
-                clicked = True
-                break
-            except NoSuchElementException:
-                continue
-            except Exception:
-                continue
-
-    if not clicked:
         return False
 
-    fin = time.time() + timeout_espera
+
+def _intentar_click_siguiente(driver, log):
+    for texto in ["Siguiente", "Próxima", "Próximo", "Next", ">"]:
+        try:
+            candidatos = driver.find_elements(By.XPATH, f"//*[normalize-space(text())='{texto}']")
+            candidatos = [c for c in candidatos if c.is_displayed()]
+            if not candidatos:
+                continue
+            siguiente = candidatos[-1]
+            clase = siguiente.get_attribute("class") or ""
+            aria = siguiente.get_attribute("aria-disabled") or ""
+            disabled_attr = siguiente.get_attribute("disabled")
+            if "disabled" in clase.lower() or aria.lower() == "true" or disabled_attr:
+                continue
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", siguiente)
+            time.sleep(0.5)
+            siguiente.click()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _esperar_cambio_folios(driver, folios_antes, timeout):
+    fin = time.time() + timeout
     while time.time() < fin:
         time.sleep(0.7)
         folios_actuales = obtener_folios_actuales(driver)
         if folios_actuales and folios_actuales != folios_antes:
             return True
+    return False
 
-    log.warning(f"Se hizo click para ir a la página {siguiente_pagina_num} pero los folios no cambiaron.")
+
+def ir_siguiente_pagina(driver, pagina_actual, folios_antes, log, timeout_espera=20):
+    """Avanza de página probando, EN ORDEN, hasta 2 estrategias distintas:
+    1) clic en el número de página siguiente, 2) clic en 'Siguiente'/equivalentes.
+    Si la primera 'tuvo éxito' (encontró y clickeó algo) pero los folios NO
+    cambiaron de verdad (ej. porque clickeó un elemento oculto/duplicado),
+    se prueba también la segunda estrategia antes de rendirse."""
+    siguiente_pagina_num = pagina_actual + 1
+
+    if _intentar_click_pagina_numerada(driver, siguiente_pagina_num, log):
+        if _esperar_cambio_folios(driver, folios_antes, timeout_espera):
+            return True
+        log.warning(
+            f"Se clickeó el número de página {siguiente_pagina_num} pero los folios no "
+            f"cambiaron. Probando con el botón 'Siguiente' como respaldo..."
+        )
+
+    if _intentar_click_siguiente(driver, log):
+        if _esperar_cambio_folios(driver, folios_antes, timeout_espera):
+            return True
+        log.warning(f"Se clickeó 'Siguiente' pero los folios tampoco cambiaron.")
+
     return False
 
 
@@ -710,6 +749,12 @@ def descargar_todas_las_paginas(driver, carpeta_pdf, log, progreso_callback=None
 
     log.info(f"TOTAL de PDFs descargados: {total_general}")
     log.info(f"TOTAL de registros de tabla capturados: {len(registros_globales)}")
+    if total_esperado and total_general < total_esperado:
+        log.warning(
+            f"⚠️ Se esperaban {total_esperado} registros pero solo se descargaron "
+            f"{total_general}. Es posible que la paginación se haya cortado antes de "
+            f"tiempo. Revisa si en el sitio realmente hay más páginas de las procesadas."
+        )
     if fallidos_general:
         log.warning(f"Filas fallidas (página, fila): {fallidos_general}")
     return total_general, registros_globales
