@@ -2,13 +2,19 @@
 """App de Streamlit: descarga y extracción de Licencias Médicas (lmempleador.cl)."""
 
 import streamlit as st
+from dateutil.relativedelta import relativedelta
 
 from licencias_scraper import ejecutar_scraping, hoy_chile
 
 st.set_page_config(page_title="Licencias Médicas SSMOCC", page_icon="🩺", layout="centered")
 
 st.title("🩺 Descarga de Licencias Médicas")
-st.caption(f"Filtro por el día de hoy ({hoy_chile().strftime('%d/%m/%Y')}) — Hospital Félix Bulnes")
+_hoy = hoy_chile()
+_desde = _hoy - relativedelta(months=1)
+st.caption(
+    f"Filtro: {_desde.strftime('%d/%m/%Y')} al {_hoy.strftime('%d/%m/%Y')} "
+    f"(último mes) — Hospital Félix Bulnes"
+)
 
 with st.form("credenciales"):
     email = st.text_input("Correo PortalUE")
